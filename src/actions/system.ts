@@ -1,9 +1,7 @@
 import {
 	action,
 	KeyAction,
-	KeyDownEvent,
-	WillAppearEvent,
-	WillDisappearEvent
+	KeyDownEvent
 } from "@elgato/streamdeck";
 
 import { PollingAction } from "./base-polling";
@@ -40,7 +38,7 @@ export class SystemStats extends PollingAction {
 
 	private modes = new Map<string, DisplayMode>();
 
-	private wifiCache: WifiInfo = {
+	private cache: WifiInfo = {
 		connected: false,
 		ssid: "--",
 		signal: 0,
@@ -49,7 +47,7 @@ export class SystemStats extends PollingAction {
 		ping: null
 	};
 
-	private lastUpdate = 0;
+	private lastRefresh = 0;
 
 
 	protected async refresh(
@@ -62,18 +60,21 @@ export class SystemStats extends PollingAction {
 			this.modes.get(actionKey.id) ?? DisplayMode.Signal;
 
 
-		if (Date.now() - this.lastUpdate > 10000) {
-			this.wifiCache = await this.getWifiInfo(
+		// Refresh data every 5 seconds only
+		if (Date.now() - this.lastRefresh > 5000) {
+			this.cache = await this.getWifiInfo(
 				mode === DisplayMode.Ping
 			);
-			this.lastUpdate = Date.now();
+
+			this.lastRefresh = Date.now();
 		}
 
 
-		const wifi = this.wifiCache;
+		const wifi = this.cache;
 
 
 		if (!wifi.connected) {
+
 			await actionKey.setImage(
 				renderKeyFace({
 					status: "error",
@@ -81,6 +82,7 @@ export class SystemStats extends PollingAction {
 					label: "Wi-Fi"
 				})
 			);
+
 			return;
 		}
 
@@ -99,62 +101,69 @@ export class SystemStats extends PollingAction {
 				subValue = wifi.ssid;
 				label = "Wi-Fi";
 
-				if (wifi.signal < 40) {
+				if (wifi.signal < 40)
 					status = "error";
-				} else if (wifi.signal < 70) {
+				else if (wifi.signal < 70)
 					status = "warn";
-				}
 
 				break;
 
 
 			case DisplayMode.SSID:
-			{
-				const ssid = wifi.ssid;
 
-				if (ssid.length > 12) {
-					const splitAt = Math.ceil(ssid.length / 2);
-					value = ssid.substring(0, splitAt);
-					subValue = ssid.substring(splitAt);
-				} else {
-					value = ssid;
-				}
+				value = wifi.ssid.length > 12
+					? wifi.ssid.substring(0, 12)
+					: wifi.ssid;
+
+				subValue = wifi.ssid.length > 12
+					? wifi.ssid.substring(12)
+					: "";
 
 				label = "SSID";
+
 				break;
-			}
 
 
 			case DisplayMode.IP:
-			{
-				const parts = wifi.ip.split(".");
 
-				if (parts.length === 4) {
-					value = `${parts[0]}.${parts[1]}`;
-					subValue = `${parts[2]}.${parts[3]}`;
-				} else {
-					value = wifi.ip;
+				{
+					const parts = wifi.ip.split(".");
+
+					value =
+						parts.length === 4
+							? `${parts[0]}.${parts[1]}`
+							: wifi.ip;
+
+					subValue =
+						parts.length === 4
+							? `${parts[2]}.${parts[3]}`
+							: "";
+
+					label = "IP";
 				}
 
-				label = "IP";
 				break;
-			}
 
 
 			case DisplayMode.Gateway:
-			{
-				const parts = wifi.gateway.split(".");
 
-				if (parts.length === 4) {
-					value = `${parts[0]}.${parts[1]}`;
-					subValue = `${parts[2]}.${parts[3]}`;
-				} else {
-					value = wifi.gateway;
+				{
+					const parts = wifi.gateway.split(".");
+
+					value =
+						parts.length === 4
+							? `${parts[0]}.${parts[1]}`
+							: wifi.gateway;
+
+					subValue =
+						parts.length === 4
+							? `${parts[2]}.${parts[3]}`
+							: "";
+
+					label = "GW";
 				}
 
-				label = "GW";
 				break;
-			}
 
 
 			case DisplayMode.Ping:
@@ -164,6 +173,7 @@ export class SystemStats extends PollingAction {
 					: "--";
 
 				label = "Internet";
+
 				break;
 		}
 
@@ -180,37 +190,12 @@ export class SystemStats extends PollingAction {
 
 
 
-	override async onWillAppear(
-		ev: WillAppearEvent
-	): Promise<void> {
-
-		if (!ev.action.isKey()) {
-			return;
-		}
-
-		await this.refresh(
-			ev.action as KeyAction,
-			{} as ImmichClient,
-			{} as GlobalSettings
-		);
-	}
-
-
-
-	override onWillDisappear(
-		_ev: WillDisappearEvent
-	): void {
-	}
-
-
-
 	override async onKeyDown(
 		ev: KeyDownEvent
 	): Promise<void> {
 
-		if (!ev.action.isKey()) {
+		if (!ev.action.isKey())
 			return;
-		}
 
 
 		const action = ev.action as KeyAction;
@@ -246,28 +231,19 @@ export class SystemStats extends PollingAction {
 		includePing: boolean
 	): Promise<WifiInfo> {
 
-		const { stdout } =
+		const { stdout: wifiOutput } =
 			await execAsync(
 				"netsh wlan show interfaces"
 			);
 
 
-		const get = (name: string) =>
-			stdout.match(
+		const getWifi = (name: string) =>
+			wifiOutput.match(
 				new RegExp(
 					`^\\s*${name}\\s*:\\s*(.+)$`,
 					"mi"
 				)
 			)?.[1]?.trim() ?? "";
-
-
-
-		const signal =
-			parseInt(
-				get("Signal").replace("%", ""),
-				10
-			) || 0;
-
 
 
 		let ip = "--";
@@ -278,19 +254,29 @@ export class SystemStats extends PollingAction {
 
 			const { stdout } =
 				await execAsync(
-					'powershell -Command "Get-NetIPConfiguration -InterfaceAlias \\"Wi-Fi\\" | ConvertTo-Json"'
+					'powershell -Command "Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -like \\"192.168.*\\"} | Select-Object -ExpandProperty IPAddress"'
 				);
 
 
-			const net = JSON.parse(stdout);
-
-
 			ip =
-				net.IPv4Address?.IPAddress ?? "--";
+				stdout.trim() || "--";
+
+
+		} catch {
+		}
+
+
+
+		try {
+
+			const { stdout } =
+				await execAsync(
+					'powershell -Command "Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object -First 1 -ExpandProperty NextHop"'
+				);
 
 
 			gateway =
-				net.IPv4DefaultGateway?.NextHop ?? "--";
+				stdout.trim() || "--";
 
 
 		} catch {
@@ -325,12 +311,17 @@ export class SystemStats extends PollingAction {
 
 		return {
 			connected:
-				get("State").toLowerCase() === "connected",
+				getWifi("State").toLowerCase() === "connected",
 
 			ssid:
-				get("SSID"),
+				getWifi("SSID") || "--",
 
-			signal,
+			signal:
+				parseInt(
+					getWifi("Signal").replace("%", ""),
+					10
+				) || 0,
+
 			ip,
 			gateway,
 			ping
